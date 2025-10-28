@@ -21,7 +21,7 @@ jobs:
           
           # API 配置
           API_URL="https://satellai-web.onrender.com/api/v2/web/subscriptions-by-customer?customerId=8781631226012"
-          API_KEY="invalid_test_key_12345"
+          API_KEY="n2Kf0YzP8vXbR5wTjC1sLqGmEoA7HdU3"
           
           # 发起请求并记录响应
           START_TIME=$(date +%s%3N)
