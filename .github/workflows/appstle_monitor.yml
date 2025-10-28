@@ -4,7 +4,7 @@ on:
   schedule:
     # 每1分钟运行一次
     - cron: '* * * * *'
-  workflow_dispatch:  # 允许手动触发测试
+  #workflow_dispatch:  # 允许手动触发测试
 
 jobs:
   monitor:
