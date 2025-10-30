@@ -2,9 +2,9 @@ name: Appstle API Monitor
 
 on:
   schedule:
-    # 每1分钟运行一次
+    # 每 1 分钟运行一次
     - cron: '* * * * *'
-  #workflow_dispatch:  # 允许手动触发测试
+  #workflow_dispatch:  # 可手动触发测试
 
 jobs:
   monitor:
@@ -36,27 +36,33 @@ jobs:
           
           END_TIME=$(date +%s%3N)
           RESPONSE_TIME=$((END_TIME - START_TIME))
-          
           CURRENT_TIME=$(date '+%Y-%m-%d %H:%M:%S UTC')
           
           echo "检测时间: $CURRENT_TIME"
           echo "HTTP状态码: $HTTP_CODE"
           echo "响应时间: ${RESPONSE_TIME}ms"
           
-          # 保存检测时间供邮件使用
           echo "check_time=$CURRENT_TIME" >> $GITHUB_OUTPUT
+          echo "http_code=$HTTP_CODE" >> $GITHUB_OUTPUT
+          echo "response_time=$RESPONSE_TIME" >> $GITHUB_OUTPUT
           
-          # 检查状态码
-          if [ "$HTTP_CODE" -eq 200 ]; then
+          # ======================
+          # 状态码逻辑判断
+          # ======================
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
             echo "✅ API 正常 (状态码: $HTTP_CODE, 响应时间: ${RESPONSE_TIME}ms)"
             echo "status=success" >> $GITHUB_OUTPUT
-            echo "http_code=$HTTP_CODE" >> $GITHUB_OUTPUT
-            echo "response_time=$RESPONSE_TIME" >> $GITHUB_OUTPUT
-          else
+          
+          elif [ "$HTTP_CODE" -ge 400 ] && [ "$HTTP_CODE" -lt 500 ]; then
+            echo "⚠️ 警告: 客户端错误 (状态码: $HTTP_CODE)"
+            if [ "$HTTP_CODE" -eq 404 ]; then
+              echo "⚠️ 资源未找到，请检查接口路径或参数"
+            fi
+            echo "status=warning" >> $GITHUB_OUTPUT
+          
+          elif [ "$HTTP_CODE" -ge 500 ]; then
             echo "❌ API 异常 (状态码: $HTTP_CODE)"
             echo "status=failed" >> $GITHUB_OUTPUT
-            echo "http_code=$HTTP_CODE" >> $GITHUB_OUTPUT
-            echo "response_time=$RESPONSE_TIME" >> $GITHUB_OUTPUT
             
             # 读取错误响应
             if [ -f response.json ]; then
@@ -68,6 +74,10 @@ jobs:
             fi
             
             exit 1
+          
+          else
+            echo "⚠️ 未知状态码: $HTTP_CODE"
+            echo "status=unknown" >> $GITHUB_OUTPUT
           fi
           
           # 检查响应时间（超过5秒告警）
@@ -76,6 +86,7 @@ jobs:
             echo "slow_response=true" >> $GITHUB_OUTPUT
           fi
 
+      # 🚨 邮件报警（仅 5xx）
       - name: Send Email Alert on Failure
         if: failure()
         uses: dawidd6/action-send-mail@v3
@@ -90,96 +101,44 @@ jobs:
           html_body: |
             <!DOCTYPE html>
             <html>
-              <head>
-                <meta charset="UTF-8">
-              </head>
+              <head><meta charset="UTF-8"></head>
               <body style="font-family: Arial, sans-serif; padding: 20px; background-color: #f5f5f5;">
                 <div style="max-width: 600px; margin: 0 auto; background-color: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
                   
-                  <!-- Header -->
                   <div style="background-color: #d32f2f; padding: 20px; text-align: center;">
                     <h1 style="color: white; margin: 0; font-size: 24px;">🚨 API 故障告警</h1>
                   </div>
                   
-                  <!-- Alert Content -->
                   <div style="padding: 30px;">
-                    <div style="background-color: #ffebee; padding: 20px; border-radius: 5px; border-left: 4px solid #d32f2f; margin-bottom: 20px;">
-                      <h2 style="margin-top: 0; color: #c62828; font-size: 18px;">Appstle API 请求失败</h2>
-                      <p style="margin: 10px 0; font-size: 16px;">
-                        <strong>状态码:</strong> 
-                        <span style="color: #d32f2f; font-size: 18px; font-weight: bold;">
-                          ${{ steps.api_check.outputs.http_code || '无响应' }}
-                        </span>
-                      </p>
-                      <p style="margin: 10px 0;">
-                        <strong>响应时间:</strong> ${{ steps.api_check.outputs.response_time || 'N/A' }}ms
-                      </p>
-                      <p style="margin: 10px 0;">
-                        <strong>检测时间:</strong> ${{ steps.api_check.outputs.check_time }}
-                      </p>
+                    <div style="background-color: #ffebee; padding: 20px; border-radius: 5px; border-left: 4px solid #d32f2f;">
+                      <h2 style="color: #c62828;">Appstle API 请求失败</h2>
+                      <p><strong>状态码:</strong> ${{ steps.api_check.outputs.http_code || '无响应' }}</p>
+                      <p><strong>响应时间:</strong> ${{ steps.api_check.outputs.response_time || 'N/A' }}ms</p>
+                      <p><strong>检测时间:</strong> ${{ steps.api_check.outputs.check_time }}</p>
                     </div>
-                    
-                    <!-- API Info -->
-                    <div style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin-bottom: 20px;">
-                      <h3 style="margin-top: 0; font-size: 16px;">📋 API 信息</h3>
-                      <table style="width: 100%; border-collapse: collapse;">
-                        <tr>
-                          <td style="padding: 8px 0; font-weight: bold; width: 100px;">接口:</td>
-                          <td style="padding: 8px 0;">GET /api/v2/web/subscriptions-by-customer</td>
-                        </tr>
-                        <tr>
-                          <td style="padding: 8px 0; font-weight: bold;">环境:</td>
-                          <td style="padding: 8px 0;">satellai-web.onrender.com</td>
-                        </tr>
-                        <tr>
-                          <td style="padding: 8px 0; font-weight: bold;">客户ID:</td>
-                          <td style="padding: 8px 0;">8781631226012</td>
-                        </tr>
-                      </table>
-                    </div>
-                    
-                    <!-- Error Details -->
-                    <div style="background-color: #fff3cd; padding: 15px; border-radius: 5px; margin-bottom: 20px;">
-                      <h3 style="margin-top: 0; font-size: 16px;">⚠️ 错误详情</h3>
-                      <pre style="background-color: white; padding: 15px; border: 1px solid #ddd; border-radius: 3px; overflow-x: auto; font-size: 13px; margin: 10px 0;">
+
+                    <div style="background-color: #fff3cd; padding: 15px; border-radius: 5px;">
+                      <h3>⚠️ 错误详情</h3>
+                      <pre style="background-color: white; padding: 15px; border: 1px solid #ddd; border-radius: 3px; overflow-x: auto; font-size: 13px;">
                       ${{ steps.api_check.outputs.error_body || '无法获取错误响应内容' }}</pre>
                     </div>
-                    
-                    <!-- Action Link -->
+
                     <div style="text-align: center; margin: 30px 0;">
                       <a href="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" 
-                         style="display: inline-block; background-color: #1976d2; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; font-weight: bold;">
+                         style="background-color: #1976d2; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px;">
                         查看详细日志
                       </a>
                     </div>
-                    
-                    <!-- Suggestions -->
-                    <div style="background-color: #e3f2fd; padding: 15px; border-radius: 5px; border-left: 4px solid #1976d2;">
-                      <h4 style="margin-top: 0; color: #1565c0;">💡 建议措施</h4>
-                      <ul style="margin: 10px 0; padding-left: 20px;">
-                        <li>立即检查 Appstle API 服务状态</li>
-                        <li>验证 API Key 是否有效</li>
-                        <li>检查客户 ID 是否正确</li>
-                        <li>查看 Appstle 后台是否有维护通知</li>
-                        <li>如持续失败，联系 Appstle 技术支持</li>
-                      </ul>
-                    </div>
                   </div>
                   
-                  <!-- Footer -->
-                  <div style="background-color: #f5f5f5; padding: 20px; text-align: center; border-top: 1px solid #ddd;">
-                    <p style="color: #666; font-size: 12px; margin: 5px 0;">
-                      此邮件由 GitHub Actions 自动发送 | 监控频率: 每1分钟
-                    </p>
-                    <p style="color: #666; font-size: 12px; margin: 5px 0;">
-                      仓库: ${{ github.repository }} | 工作流: ${{ github.workflow }}
-                    </p>
+                  <div style="background-color: #f5f5f5; padding: 20px; text-align: center;">
+                    <p style="font-size: 12px; color: #666;">此邮件由 GitHub Actions 自动发送 | 监控频率: 每1分钟</p>
                   </div>
-                  
                 </div>
               </body>
             </html>
 
+      # ⚠️ 性能告警（响应超时）
       - name: Send Email Alert on Slow Response
         if: steps.api_check.outputs.slow_response == 'true'
         uses: dawidd6/action-send-mail@v3
@@ -192,83 +151,12 @@ jobs:
           to: wangke@satellai.com
           from: Appstle API Monitor <${{ secrets.EMAIL_USERNAME }}>
           html_body: |
-            <!DOCTYPE html>
-            <html>
-              <head>
-                <meta charset="UTF-8">
-              </head>
-              <body style="font-family: Arial, sans-serif; padding: 20px; background-color: #f5f5f5;">
-                <div style="max-width: 600px; margin: 0 auto; background-color: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
-                  
-                  <!-- Header -->
-                  <div style="background-color: #f57c00; padding: 20px; text-align: center;">
-                    <h1 style="color: white; margin: 0; font-size: 24px;">⚠️ API 性能告警</h1>
-                  </div>
-                  
-                  <!-- Alert Content -->
-                  <div style="padding: 30px;">
-                    <div style="background-color: #fff3e0; padding: 20px; border-radius: 5px; border-left: 4px solid #f57c00; margin-bottom: 20px;">
-                      <h2 style="margin-top: 0; color: #e65100; font-size: 18px;">Appstle API 响应时间过长</h2>
-                      <p style="margin: 10px 0; font-size: 16px;">
-                        <strong>响应时间:</strong> 
-                        <span style="color: #f57c00; font-size: 20px; font-weight: bold;">
-                          ${{ steps.api_check.outputs.response_time }}ms
-                        </span>
-                      </p>
-                      <p style="margin: 10px 0;">
-                        <strong>状态码:</strong> ${{ steps.api_check.outputs.http_code }}
-                      </p>
-                      <p style="margin: 10px 0;">
-                        <strong>阈值:</strong> 5000ms (5秒)
-                      </p>
-                      <p style="margin: 10px 0;">
-                        <strong>检测时间:</strong> ${{ steps.api_check.outputs.check_time }}
-                      </p>
-                    </div>
-                    
-                    <!-- Performance Chart -->
-                    <div style="background-color: #f5f5f5; padding: 15px; border-radius: 5px; margin-bottom: 20px;">
-                      <h3 style="margin-top: 0; font-size: 16px;">📊 性能指标</h3>
-                      <div style="background-color: white; padding: 15px; border-radius: 3px;">
-                        <p style="margin: 5px 0;">虽然请求成功，但响应时间明显超过预期阈值。</p>
-                        <p style="margin: 5px 0; color: #666;">建议关注服务器性能和网络状况。</p>
-                      </div>
-                    </div>
-                    
-                    <!-- Action Link -->
-                    <div style="text-align: center; margin: 30px 0;">
-                      <a href="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" 
-                         style="display: inline-block; background-color: #1976d2; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; font-weight: bold;">
-                        查看详细日志
-                      </a>
-                    </div>
-                    
-                    <!-- Suggestions -->
-                    <div style="background-color: #e3f2fd; padding: 15px; border-radius: 5px; border-left: 4px solid #1976d2;">
-                      <h4 style="margin-top: 0; color: #1565c0;">💡 优化建议</h4>
-                      <ul style="margin: 10px 0; padding-left: 20px;">
-                        <li>检查 Appstle API 服务器负载情况</li>
-                        <li>验证网络连接是否稳定</li>
-                        <li>查看是否有大量并发请求</li>
-                        <li>考虑添加请求缓存机制</li>
-                        <li>如持续缓慢，联系 Appstle 技术支持</li>
-                      </ul>
-                    </div>
-                  </div>
-                  
-                  <!-- Footer -->
-                  <div style="background-color: #f5f5f5; padding: 20px; text-align: center; border-top: 1px solid #ddd;">
-                    <p style="color: #666; font-size: 12px; margin: 5px 0;">
-                      此邮件由 GitHub Actions 自动发送 | 监控频率: 每1分钟
-                    </p>
-                    <p style="color: #666; font-size: 12px; margin: 5px 0;">
-                      仓库: ${{ github.repository }} | 工作流: ${{ github.workflow }}
-                    </p>
-                  </div>
-                  
-                </div>
-              </body>
-            </html>
+            <html><body style="font-family: Arial, sans-serif; padding: 20px;">
+              <h2 style="color:#e65100;">⚠️ Appstle API 响应时间过长</h2>
+              <p><strong>响应时间:</strong> ${{ steps.api_check.outputs.response_time }}ms</p>
+              <p><strong>检测时间:</strong> ${{ steps.api_check.outputs.check_time }}</p>
+              <p>请检查服务器性能、网络延迟或外部依赖。</p>
+            </body></html>
 
       - name: Log Success
         if: success()
