@@ -1,0 +1,348 @@
+name: API Monitor with Email Alerts
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'  # 每5分钟运行一次
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: pip install requests
+      
+      - name: Monitor API with Smart Alerting
+        id: monitor
+        env:
+          REFRESH_TOKEN: ${{ secrets.REFRESH_TOKEN }}
+          CLIENT_ID: ${{ secrets.CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+          TOKEN_ENDPOINT: ${{ secrets.TOKEN_ENDPOINT }}
+          API_URL: ${{ secrets.API_URL }}
+        run: |
+          python << 'EOF'
+          import requests
+          import os
+          import sys
+          import json
+          from datetime import datetime
+          
+          # 配置
+          API_URL = os.getenv('API_URL', 'https://icmmdwdp03.execute-api.us-west-1.amazonaws.com/dev/user/query-by-email')
+          API_TIMEOUT = 30  # 秒
+          
+          def get_access_token_from_refresh():
+              """使用refresh token获取新的access token"""
+              try:
+                  refresh_token = os.getenv('REFRESH_TOKEN')
+                  client_id = os.getenv('CLIENT_ID')
+                  client_secret = os.getenv('CLIENT_SECRET')
+                  token_endpoint = os.getenv('TOKEN_ENDPOINT')
+                  
+                  if not all([refresh_token, client_id, token_endpoint]):
+                      raise ValueError("缺少必要的环境变量")
+                  
+                  data = {
+                      'grant_type': 'refresh_token',
+                      'refresh_token': refresh_token,
+                      'client_id': client_id
+                  }
+                  
+                  headers = {
+                      'Content-Type': 'application/x-www-form-urlencoded'
+                  }
+                  
+                  auth = (client_id, client_secret) if client_secret else None
+                  
+                  print(f"🔄 正在刷新token... [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]")
+                  response = requests.post(
+                      token_endpoint,
+                      data=data,
+                      headers=headers,
+                      auth=auth,
+                      timeout=10
+                  )
+                  
+                  response.raise_for_status()
+                  token_data = response.json()
+                  
+                  access_token = token_data.get('access_token')
+                  if not access_token:
+                      raise ValueError("未能从响应中获取access_token")
+                  
+                  print(f"✅ Token刷新成功 (有效期: {token_data.get('expires_in', 'N/A')}秒)")
+                  return access_token
+                  
+              except Exception as e:
+                  print(f"❌ Token刷新失败: {str(e)}")
+                  raise
+          
+          def check_api(access_token):
+              """调用API并返回详细状态"""
+              result = {
+                  'success': False,
+                  'status_code': None,
+                  'error_type': None,
+                  'error_message': None,
+                  'response_time': None,
+                  'should_alert': False
+              }
+              
+              try:
+                  headers = {
+                      'Authorization': f'Bearer {access_token}',
+                      'User-Agent': 'GitHub-Actions-Monitor',
+                      'Accept': '*/*',
+                      'Cache-Control': 'no-cache',
+                      'Accept-Encoding': 'gzip, deflate, br',
+                      'Connection': 'keep-alive'
+                  }
+                  
+                  print(f"\n📡 调用API... [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]")
+                  print(f"URL: {API_URL}")
+                  
+                  import time
+                  start_time = time.time()
+                  
+                  response = requests.get(
+                      API_URL,
+                      headers=headers,
+                      timeout=API_TIMEOUT
+                  )
+                  
+                  response_time = time.time() - start_time
+                  result['response_time'] = response_time
+                  result['status_code'] = response.status_code
+                  
+                  print(f"⏱️  响应时间: {response_time:.2f}秒")
+                  print(f"📊 状态码: {response.status_code}")
+                  
+                  # 根据状态码分类处理
+                  if 200 <= response.status_code < 300:
+                      # 2xx - 成功
+                      result['success'] = True
+                      result['should_alert'] = False
+                      print(f"✅ API调用成功")
+                      
+                      response_preview = response.text[:300]
+                      if len(response.text) > 300:
+                          response_preview += "..."
+                      print(f"响应内容: {response_preview}")
+                      
+                  elif 400 <= response.status_code < 500:
+                      # 4xx - 客户端错误，仅记录日志
+                      result['success'] = False
+                      result['error_type'] = '4xx_client_error'
+                      result['error_message'] = f"客户端错误 {response.status_code}"
+                      result['should_alert'] = False  # 4xx不发送邮件
+                      
+                      print(f"⚠️  客户端错误 {response.status_code} - 仅记录日志，不发送告警")
+                      print(f"响应内容: {response.text[:500]}")
+                      
+                  elif 500 <= response.status_code < 600:
+                      # 5xx - 服务器错误，需要告警
+                      result['success'] = False
+                      result['error_type'] = '5xx_server_error'
+                      result['error_message'] = f"服务器错误 {response.status_code}: {response.text[:200]}"
+                      result['should_alert'] = True
+                      
+                      print(f"❌ 服务器错误 {response.status_code} - 将发送邮件告警")
+                      print(f"响应内容: {response.text[:500]}")
+                  
+                  return result
+                  
+              except requests.exceptions.Timeout:
+                  # 超时错误，需要告警
+                  result['error_type'] = 'timeout'
+                  result['error_message'] = f"API调用超时（超过{API_TIMEOUT}秒）"
+                  result['should_alert'] = True
+                  
+                  print(f"❌ API调用超时 - 将发送邮件告警")
+                  print(f"超时设置: {API_TIMEOUT}秒")
+                  return result
+                  
+              except requests.exceptions.RequestException as e:
+                  # 其他网络错误，需要告警
+                  result['error_type'] = 'network_error'
+                  result['error_message'] = f"网络错误: {str(e)}"
+                  result['should_alert'] = True
+                  
+                  print(f"❌ 网络错误 - 将发送邮件告警")
+                  print(f"错误详情: {str(e)}")
+                  
+                  if hasattr(e, 'response') and e.response is not None:
+                      result['status_code'] = e.response.status_code
+                      print(f"响应状态: {e.response.status_code}")
+                  
+                  return result
+          
+          def save_result_for_email(result):
+              """保存结果供后续步骤使用"""
+              # 写入GitHub Actions输出
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write(f"should_alert={str(result['should_alert']).lower()}\n")
+                  f.write(f"error_type={result.get('error_type', '')}\n")
+                  f.write(f"error_message={result.get('error_message', '')}\n")
+                  f.write(f"status_code={result.get('status_code', 'N/A')}\n")
+                  f.write(f"response_time={result.get('response_time', 'N/A')}\n")
+          
+          def main():
+              try:
+                  # 步骤1: 刷新token
+                  access_token = get_access_token_from_refresh()
+                  
+                  # 步骤2: 调用API
+                  result = check_api(access_token)
+                  
+                  # 步骤3: 保存结果
+                  save_result_for_email(result)
+                  
+                  print(f"\n{'='*60}")
+                  print(f"监控摘要 [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]")
+                  print(f"{'='*60}")
+                  print(f"状态: {'✅ 成功' if result['success'] else '❌ 失败'}")
+                  print(f"状态码: {result['status_code']}")
+                  print(f"响应时间: {result['response_time']:.2f}秒" if result['response_time'] else "响应时间: N/A")
+                  print(f"是否告警: {'是' if result['should_alert'] else '否'}")
+                  if result['error_type']:
+                      print(f"错误类型: {result['error_type']}")
+                  print(f"{'='*60}\n")
+                  
+                  # 如果需要告警，返回非零退出码触发邮件步骤
+                  if result['should_alert']:
+                      sys.exit(1)
+                  else:
+                      sys.exit(0)
+                  
+              except Exception as e:
+                  print(f"\n❌ 监控执行异常: {str(e)}")
+                  # 保存异常信息
+                  with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                      f.write(f"should_alert=true\n")
+                      f.write(f"error_type=exception\n")
+                      f.write(f"error_message=监控脚本异常: {str(e)}\n")
+                      f.write(f"status_code=N/A\n")
+                  sys.exit(1)
+          
+          if __name__ == '__main__':
+              main()
+          EOF
+      
+      - name: Send Email Alert
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587
+          username: sherrywangboston@gmail.com
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: '🚨 API监控告警 - ${{ steps.monitor.outputs.error_type }}'
+          to: wangke@satellai.com
+          from: sherrywangboston@gmail.com
+          body: |
+            API监控检测到异常，请及时处理！
+            
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            📋 告警详情
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            
+            🔴 错误类型: ${{ steps.monitor.outputs.error_type }}
+            📊 状态码: ${{ steps.monitor.outputs.status_code }}
+            ⏱️  响应时间: ${{ steps.monitor.outputs.response_time }}秒
+            🕐 告警时间: ${{ github.event.repository.updated_at }}
+            
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            📝 错误信息
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            
+            ${{ steps.monitor.outputs.error_message }}
+            
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            🔗 相关链接
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            
+            API地址: https://icmmdwdp03.execute-api.us-west-1.amazonaws.com/dev/user/query-by-email
+            
+            查看详细日志: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            
+            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            
+            此邮件由 GitHub Actions 自动发送
+            仓库: ${{ github.repository }}
+            分支: ${{ github.ref }}
+          html_body: |
+            <!DOCTYPE html>
+            <html>
+            <head>
+              <style>
+                body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+                .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+                .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; border-radius: 10px 10px 0 0; text-align: center; }
+                .content { background: #f7f7f7; padding: 30px; border-radius: 0 0 10px 10px; }
+                .alert-box { background: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0; border-radius: 4px; }
+                .error-box { background: #f8d7da; border-left: 4px solid #dc3545; padding: 15px; margin: 20px 0; border-radius: 4px; }
+                .info-box { background: #d1ecf1; border-left: 4px solid #17a2b8; padding: 15px; margin: 20px 0; border-radius: 4px; }
+                .detail-row { padding: 10px 0; border-bottom: 1px solid #dee2e6; }
+                .detail-label { font-weight: bold; color: #666; display: inline-block; width: 120px; }
+                .button { display: inline-block; padding: 12px 24px; background: #667eea; color: white; text-decoration: none; border-radius: 5px; margin-top: 20px; }
+                .footer { text-align: center; color: #666; font-size: 12px; margin-top: 20px; }
+              </style>
+            </head>
+            <body>
+              <div class="container">
+                <div class="header">
+                  <h1>🚨 API监控告警</h1>
+                  <p>检测到异常情况，请及时处理</p>
+                </div>
+                <div class="content">
+                  <div class="error-box">
+                    <h3>🔴 错误类型: ${{ steps.monitor.outputs.error_type }}</h3>
+                  </div>
+                  
+                  <div class="detail-row">
+                    <span class="detail-label">📊 状态码:</span>
+                    <span>${{ steps.monitor.outputs.status_code }}</span>
+                  </div>
+                  
+                  <div class="detail-row">
+                    <span class="detail-label">⏱️ 响应时间:</span>
+                    <span>${{ steps.monitor.outputs.response_time }}秒</span>
+                  </div>
+                  
+                  <div class="detail-row">
+                    <span class="detail-label">🕐 告警时间:</span>
+                    <span>${{ github.event.repository.updated_at }}</span>
+                  </div>
+                  
+                  <div class="info-box">
+                    <h4>📝 错误详情</h4>
+                    <p>${{ steps.monitor.outputs.error_message }}</p>
+                  </div>
+                  
+                  <div class="alert-box">
+                    <h4>🔗 API地址</h4>
+                    <p><code>https://icmmdwdp03.execute-api.us-west-1.amazonaws.com/dev/user/query-by-email</code></p>
+                  </div>
+                  
+                  <center>
+                    <a href="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" class="button">
+                      查看详细日志
+                    </a>
+                  </center>
+                  
+                  <div class="footer">
+                    <p>此邮件由 GitHub Actions 自动发送</p>
+                    <p>仓库: ${{ github.repository }} | 分支: ${{ github.ref }}</p>
+                  </div>
+                </div>
+              </div>
+            </body>
+            </html>
